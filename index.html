@@ -1,0 +1,480 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Receipt → Expense Log (Mini)</title>
+  <style>
+    body {
+      font-family: system-ui, Arial, sans-serif;
+      max-width: 900px;
+      margin: 24px auto;
+      padding: 0 16px;
+    }
+
+    textarea,
+    input,
+    select,
+    button {
+      font: inherit;
+    }
+
+    textarea {
+      width: 100%;
+      min-height: 110px;
+      padding: 10px;
+    }
+
+    .row {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr 1fr;
+      gap: 10px;
+      margin-top: 10px;
+    }
+
+    .row>div {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    button {
+      padding: 10px 14px;
+      cursor: pointer;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 16px;
+    }
+
+    th,
+    td {
+      border-bottom: 1px solid #ddd;
+      padding: 10px;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    .muted {
+      color: #666;
+      font-size: 0.95rem;
+    }
+
+    .actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 10px;
+    }
+
+    .total {
+      margin-top: 14px;
+      font-weight: 600;
+    }
+
+    @media (max-width: 820px) {
+      .row {
+        grid-template-columns: 1fr 1fr;
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <h1>Receipt → Expense Log (Mini)</h1>
+  <p class="muted">Paste a receipt snippet like: “Home Depot 2026-02-10 Total 87.34 GST 4.16” or “Starbucks Feb 9 2026
+    $6.55”.</p>
+
+  <label for="raw">Receipt text</label>
+  <textarea id="raw" placeholder="Paste receipt text here..."></textarea>
+
+  <div class="row">
+    <div>
+      <label for="vendor">Vendor</label>
+      <input id="vendor" placeholder="e.g., Home Depot" />
+    </div>
+    <div>
+      <label for="date">Date</label>
+      <input id="date" type="date" />
+    </div>
+    <div>
+      <label for="category">Category</label>
+      <select id="category">
+        <option>Meals & Entertainment</option>
+        <option>Office Supplies</option>
+        <option>Tools & Materials</option>
+        <option>Fuel</option>
+        <option>Travel</option>
+        <option>Software</option>
+        <option>Repairs & Maintenance</option>
+        <option>Other</option>
+      </select>
+    </div>
+    <div>
+      <label for="total">Total (CAD)</label>
+      <input id="total" inputmode="decimal" placeholder="0.00" />
+    </div>
+  </div>
+
+  <div class="row">
+    <div>
+      <label for="gst">GST (optional)</label>
+      <input id="gst" inputmode="decimal" placeholder="0.00" />
+    </div>
+
+    <div>
+      <label for="gstrate">GST Rate (%)</label>
+      <input id="gstrate" inputmode="decimal" value="5" />
+    </div>
+
+    <div>
+      <label for="net">Net (before GST)</label>
+      <input id="net" inputmode="decimal" placeholder="0.00" readonly />
+    </div>
+
+    <div>
+      <label>
+        <input type="checkbox" id="includesGST" />
+        Total includes GST
+      </label>
+    </div>
+
+
+    <div>
+      <label for="notes">Notes</label>
+      <input id="notes" placeholder="Any details..." />
+    </div>
+    <div class="actions" style="align-items:end;">
+      <button id="parseBtn">Parse receipt</button>
+      <button id="addBtn">Add to log</button>
+    </div>
+    <div class="actions" style="align-items:end;">
+      <button id="exportBtn">Export CSV</button>
+      <button id="clearBtn">Clear all</button>
+    </div>
+  </div>
+
+  <div class="total" id="sum"></div>
+  <div id="summary" style="margin-top: 20px;"></div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Date</th>
+        <th>Vendor</th>
+        <th>Category</th>
+        <th>Total</th>
+        <th>GST</th>
+        <th>Notes</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+
+    const STORAGE_KEY = "expense_mini_v1";
+
+    function load() {
+      try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]"); }
+      catch { return []; }
+    }
+    function save(items) {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
+    }
+
+    function toMoney(n) {
+      const x = Number(n);
+      if (!Number.isFinite(x)) return "";
+      return x.toFixed(2);
+    }
+
+    function guessCategory(vendor, raw) {
+      const t = (vendor + " " + raw).toLowerCase();
+
+      const rules = [
+        { cat: "Fuel", keys: ["esso", "shell", "chevron", "petro", "gas", "fuel"] },
+        { cat: "Meals & Entertainment", keys: ["starbucks", "tim hortons", "restaurant", "cafe", "pizza", "pub", "bar"] },
+        { cat: "Tools & Materials", keys: ["home depot", "rona", "lowes", "hardware", "lumber", "fastenal", "grainger"] },
+        { cat: "Office Supplies", keys: ["staples", "office", "paper", "ink", "toner"] },
+        { cat: "Software", keys: ["adobe", "microsoft", "google", "intuit", "quickbooks", "xero", "subscription"] },
+        { cat: "Travel", keys: ["hotel", "airbnb", "flight", "uber", "lyft", "taxi"] },
+        { cat: "Repairs & Maintenance", keys: ["repair", "maintenance", "mechanic", "auto", "oil change"] }
+      ];
+      for (const r of rules) {
+        if (r.keys.some(k => t.includes(k))) return r.cat;
+      }
+      return "Other";
+    }
+
+    // Parse helpers
+    function parseTotal(text) {
+      // Find last currency-ish number; handles $6.55 or 6.55 or 6,55
+      const cleaned = text.replace(/,/g, ".");
+      const matches = cleaned.match(/(?:\$?\s*)(\d{1,6}\.\d{2})/g);
+      if (!matches) return "";
+      const last = matches[matches.length - 1];
+      const num = last.match(/(\d{1,6}\.\d{2})/)[1];
+      return num;
+    }
+
+    function parseGST(text) {
+      const cleaned = text.replace(/,/g, ".");
+      // Look for "GST 4.16" or "HST 4.16"
+      const m = cleaned.match(/\b(?:gst|hst)\b\D{0,10}(\d{1,6}\.\d{2})/i);
+      return m ? m[1] : "";
+    }
+
+    function parseDate(text) {
+      // Accept YYYY-MM-DD
+      const iso = text.match(/\b(20\d{2})-(\d{2})-(\d{2})\b/);
+      if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
+
+      // Accept "Feb 9 2026" etc
+      const months = {
+        jan: "01", january: "01",
+        feb: "02", february: "02",
+        mar: "03", march: "03",
+        apr: "04", april: "04",
+        may: "05",
+        jun: "06", june: "06",
+        jul: "07", july: "07",
+        aug: "08", august: "08",
+        sep: "09", sept: "09", september: "09",
+        oct: "10", october: "10",
+        nov: "11", november: "11",
+        dec: "12", december: "12"
+      };
+
+      const m = text.match(/\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b\D{0,6}(\d{1,2})\D{0,6}(20\d{2})/i);
+      if (m) {
+        const mm = months[m[1].toLowerCase()];
+        const dd = String(m[2]).padStart(2, "0");
+        const yyyy = m[3];
+        return `${yyyy}-${mm}-${dd}`;
+      }
+
+      return "";
+    }
+
+    function parseVendor(text) {
+      // crude: take first line, strip totals-ish keywords
+      const line = text.split("\n").map(s => s.trim()).filter(Boolean)[0] || "";
+      return line.replace(/\b(total|subtotal|gst|hst|tax|visa|mastercard|debit)\b.*$/i, "").trim();
+    }
+
+    function render() {
+      const items = load();
+      const tbody = $("rows");
+      tbody.innerHTML = "";
+
+      let totalSum = 0;
+      let gstSum = 0;
+      let netSum = 0;
+      let categoryTotals = {};
+
+
+      items.forEach((it, idx) => {
+        const total = Number(it.total || 0);
+        const gst = Number(it.gst || 0);
+        const net = total - gst;
+
+        totalSum += total;
+        gstSum += gst;
+        netSum += net;
+
+        if (!categoryTotals[it.category]) {
+          categoryTotals[it.category] = 0;
+        }
+        categoryTotals[it.category] += total;
+
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+        <td>${it.date || ""}</td>
+        <td>${escapeHtml(it.vendor || "")}</td>
+        <td>${escapeHtml(it.category || "")}</td>
+        <td>${toMoney(it.total)}</td>
+        <td>${toMoney(it.gst)}</td>
+        <td>${escapeHtml(it.notes || "")}</td>
+        <td><button data-del="${idx}">Delete</button></td>
+      `;
+        tbody.appendChild(tr);
+      });
+
+      $("sum").textContent =
+        `Grand Total: $${toMoney(totalSum)} CAD (${items.length} items)`;
+      let summaryHTML = `
+  <h3>Summary</h3>
+  <p><strong>Total Net:</strong> $${toMoney(netSum)}</p>
+  <p><strong>Total GST:</strong> $${toMoney(gstSum)}</p>
+`;
+
+      summaryHTML += "<h4>By Category</h4><ul>";
+
+      for (const cat in categoryTotals) {
+        summaryHTML += `<li>${cat}: $${toMoney(categoryTotals[cat])}</li>`;
+      }
+
+      summaryHTML += "</ul>";
+
+      $("summary").innerHTML = summaryHTML;
+    }
+
+
+
+    function escapeHtml(s) {
+      return String(s)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    $("parseBtn").addEventListener("click", () => {
+      const raw = $("raw").value.trim();
+      if (!raw) return;
+
+      const vendor = parseVendor(raw);
+      const date = parseDate(raw);
+      const total = parseTotal(raw);
+      const gst = parseGST(raw);
+
+      $("vendor").value = vendor || $("vendor").value;
+      $("date").value = date || $("date").value;
+      $("total").value = total || $("total").value;
+      $("gst").value = gst || $("gst").value;
+
+      const cat = guessCategory($("vendor").value, raw);
+      $("category").value = cat;
+
+      if (!vendor && !date && !total) {
+        alert("I couldn't confidently parse much from that. Try including vendor/date/amount like: 'Home Depot 2026-02-10 Total 87.34 GST 4.16'");
+
+      }
+      calculateGST();
+    });
+
+    $("addBtn").addEventListener("click", () => {
+      const item = {
+        vendor: $("vendor").value.trim(),
+        date: $("date").value,
+        category: $("category").value,
+        total: $("total").value.trim(),
+        gst: $("gst").value.trim(),
+        notes: $("notes").value.trim(),
+        raw: $("raw").value.trim(),
+        createdAt: new Date().toISOString()
+      };
+
+      if (!item.vendor || !item.date || !item.total) {
+        alert("Need at least Vendor, Date, and Total.");
+        return;
+      }
+      if (!Number.isFinite(Number(item.total))) {
+        alert("Total must be a number like 12.34");
+        return;
+      }
+      if (item.gst && !Number.isFinite(Number(item.gst))) {
+        alert("GST must be a number like 1.23 (or leave blank)");
+        return;
+      }
+
+      const items = load();
+      items.unshift(item);
+      save(items);
+
+      // Clear minimal fields
+      $("raw").value = "";
+      $("vendor").value = "";
+      $("date").value = "";
+      $("total").value = "";
+      $("gst").value = "";
+      $("notes").value = "";
+
+      render();
+    });
+
+    $("rows").addEventListener("click", (e) => {
+      const btn = e.target.closest("button[data-del]");
+      if (!btn) return;
+      const idx = Number(btn.dataset.del);
+      const items = load();
+      items.splice(idx, 1);
+      save(items);
+      render();
+    });
+
+    $("exportBtn").addEventListener("click", () => {
+      const items = load();
+      if (!items.length) return alert("Nothing to export yet.");
+
+      const headers = ["date", "vendor", "category", "total", "gst", "notes"];
+      const lines = [
+        headers.join(","),
+        ...items.map(it => headers.map(h => csvCell(it[h])).join(","))
+      ];
+      const csv = lines.join("\n");
+
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "expense-log.csv";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    });
+
+    function csvCell(v) {
+      const s = String(v ?? "");
+      if (/[,"\n]/.test(s)) return `"${s.replaceAll('"', '""')}"`;
+      return s;
+    }
+
+    $("clearBtn").addEventListener("click", () => {
+      if (!confirm("Clear ALL saved expenses?")) return;
+      localStorage.removeItem(STORAGE_KEY);
+      render();
+    });
+    // Auto-calc GST
+    function calculateGST() {
+      const total = Number($("total").value);
+      const rate = Number($("gstrate").value);
+      const includes = $("includesGST").checked;
+
+      if (!Number.isFinite(total) || !Number.isFinite(rate)) return;
+
+      let net, gst;
+
+      if (includes) {
+        net = total / (1 + rate / 100);
+        gst = total - net;
+      } else {
+        net = total;
+        gst = (total * rate) / 100;
+      }
+
+      $("net").value = net.toFixed(2);
+      $("gst").value = gst.toFixed(2);
+    }
+
+
+
+
+    $("total").addEventListener("input", calculateGST);
+    $("gstrate").addEventListener("input", calculateGST);
+    $("includesGST").addEventListener("change", calculateGST);
+    render();
+
+  </script>
+</body>
+
+</html>
